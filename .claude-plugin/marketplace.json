@@ -1,0 +1,13 @@
+{
+  "name": "codeflow",
+  "owner": { "name": "Flavio Martil" },
+  "description": "Codeflow: turn telemetry for Claude Code",
+  "plugins": [
+    {
+      "name": "codeflow",
+      "source": "./",
+      "description": "Turn telemetry and an opt-in context reduction experiment for Claude Code",
+      "version": "1.1.1"
+    }
+  ]
+}

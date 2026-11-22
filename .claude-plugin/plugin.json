@@ -1,0 +1,50 @@
+{
+  "name": "codeflow",
+  "version": "1.1.1",
+  "description": "Turn telemetry and an opt-in context reduction experiment for Claude Code",
+  "author": { "name": "Codeflow" },
+  "userConfig": {
+    "maxFileLines": {
+      "type": "number",
+      "title": "Lines per read",
+      "description": "Maximum lines of a read file that enter the context (the rest becomes a summary with entry points)",
+      "default": 200
+    },
+    "maxToolResultChars": {
+      "type": "number",
+      "title": "Characters per read or search result",
+      "description": "Maximum characters of a tool result (search, test, CSV) that reaches the model",
+      "default": 2000
+    },
+    "maxListItems": {
+      "type": "number",
+      "title": "Items per search result",
+      "description": "Maximum items of a list (files, matches) kept before summarizing",
+      "default": 20
+    },
+    "guardPatterns": {
+      "type": "string",
+      "title": "Additional patterns to flag",
+      "description": "Comma-separated literal patterns. Active mode flags eligible calls with ask, preserving the native decision.",
+      "default": ""
+    },
+    "turnSummary": {
+      "type": "boolean",
+      "title": "Summary per response",
+      "description": "Shows duration, requests, tools, tokens and context under each response.",
+      "default": true
+    },
+    "thinking": {
+      "type": "boolean",
+      "title": "Count reasoning blocks",
+      "description": "Counts blocks and words when exposed by Claude, without copying text.",
+      "default": false
+    },
+    "sessionLog": {
+      "type": "boolean",
+      "title": "Save summary on exit",
+      "description": "Writes a numeric session summary to .codeflow in the project.",
+      "default": false
+    }
+  }
+}
