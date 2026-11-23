@@ -1,6 +1,6 @@
 {
   "name": "codeflow",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Turn telemetry and an opt-in context reduction experiment for Claude Code",
   "author": { "name": "Codeflow" },
   "userConfig": {
@@ -21,12 +21,6 @@
       "title": "Items per search result",
       "description": "Maximum items of a list (files, matches) kept before summarizing",
       "default": 20
-    },
-    "guardPatterns": {
-      "type": "string",
-      "title": "Additional patterns to flag",
-      "description": "Comma-separated literal patterns. Active mode flags eligible calls with ask, preserving the native decision.",
-      "default": ""
     },
     "turnSummary": {
       "type": "boolean",

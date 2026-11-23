@@ -1,7 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 import { DEFAULT_LIMITS, limitFileContent, limitList, truncate } from './lib/limits'
 import { operationsSection } from './lib/prompt'
-import { applyGuard, parseExtraPatterns } from './lib/guard'
 import { MAX_STATE_CHARS, MAX_STATE_ENTRIES, pruneState, STATE_TTL_MS, type CacheEntry } from './lib/state'
 import { logPath } from './lib/audit'
 import { resolveToggle } from './lib/env'
@@ -16,7 +15,6 @@ interface CodeflowOptions {
   maxFileLines?: number
   maxToolResultChars?: number
   maxListItems?: number
-  guardPatterns?: string
   turnSummary?: boolean
   thinking?: boolean
   sessionLog?: boolean
@@ -36,7 +34,6 @@ export function register(on: On, options: CodeflowOptions = {}) {
     maxToolResultChars: positiveLimit(options.maxToolResultChars, DEFAULT_LIMITS.maxToolResultChars, 64),
     maxListItems: positiveLimit(options.maxListItems, DEFAULT_LIMITS.maxListItems),
   }
-  const extraPatterns = parseExtraPatterns(options.guardPatterns)
   const showSummary = options.turnSummary !== false
   const countThinking = options.thinking === true
   const sessionLog = options.sessionLog === true
@@ -147,22 +144,6 @@ export function register(on: On, options: CodeflowOptions = {}) {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
-    const native = await next(e)
-    if (!toggle.enabled) return native
-    const result = applyGuard(native, e.input, extraPatterns)
-    if (result !== native) telemetry.guardedAsks += 1
-    return result
-  }).catch(($, e, next) => next(e))
-
-  on('tool.check', { tool: 'REPL' }, async ($, e, next) => {
-    const native = await next(e)
-    if (!toggle.enabled) return native
-    const result = applyGuard(native, e.input, extraPatterns)
-    if (result !== native) telemetry.guardedAsks += 1
-    return result
-  }).catch(($, e, next) => next(e))
-
   on('session.end', async ($, e, next) => {
     const finished = telemetry
     telemetry = newSessionTelemetry()
@@ -216,7 +197,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     return {
       text: [
-        'Codeflow 1.1.1',
+        'Codeflow 1.1.2',
         toggle.enabled ? 'Active mode' : 'Passive mode',
         toggle.invalid ? 'Invalid CLAUDE_CODEFLOW_ENABLED. Use 0 or 1.' : '',
         'Use /codeflow report to see session usage.',

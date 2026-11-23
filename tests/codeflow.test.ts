@@ -1,6 +1,5 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
-import { applyGuard } from '../hooks/lib/guard'
 import { resolveToggle } from '../hooks/lib/env'
 import { newSessionTelemetry, observeThinkingBlock, newTurnTelemetry, sumUsage, totalInput } from '../hooks/lib/telemetry'
 
@@ -78,14 +77,7 @@ test('active mode adds a session section to the prompt', async ($, on) => {
   expect(composed.sections).toHaveLength(2)
 })
 
-test('guard keeps the original deny and ask decision and reason', () => {
-  for (const decision of ['deny', 'ask'] as const) {
-    const native = { decision, reason: 'native rule' }
-    expect(applyGuard(native, { command: 'flagger' }, ['flagger'])).toEqual(native)
-  }
-})
-
-test('guard via tool.check reads the input and preserves deny', { options: { guardPatterns: 'flagger' } }, async ($, on) => {
+test('active mode never changes a permission decision', async ($, on) => {
   mockSession(on, { CLAUDE_CODEFLOW_ENABLED: '1' })
   on('tool.check', ($, e) => {
     const input = e.input as { command?: string }
@@ -94,23 +86,15 @@ test('guard via tool.check reads the input and preserves deny', { options: { gua
       : { decision: 'allow' }
   })
   await $.session.start(start)
-  const denied = await $.tool.check({ tool: 'Bash', input: { command: 'printf "flagger blocked"' } })
+  const denied = await $.tool.check({ tool: 'Bash', input: { command: 'printf blocked' } })
   expect(denied.decision).toBe('deny')
   expect(denied.reason).toBe('native rule')
-  const flagged = await $.tool.check({ tool: 'Bash', input: { command: 'printf flagger' } })
-  expect(flagged.decision).toBe('ask')
-  const plain = await $.tool.check({ tool: 'Bash', input: { command: 'printf ok' } })
-  expect(plain.decision).toBe('allow')
-  const script = await $.tool.check({ tool: 'REPL', input: { code: '"flagger"' } })
-  expect(script.decision).toBe('ask')
-})
-
-test('guard is passive when active mode is off', { options: { guardPatterns: 'flagger' } }, async ($, on) => {
-  mockSession(on)
-  on('tool.check', () => ({ decision: 'allow' }))
-  await $.session.start(start)
-  const result = await $.tool.check({ tool: 'Bash', input: { command: 'printf flagger' } })
-  expect(result.decision).toBe('allow')
+  for (const command of ['cd app && git push', 'd=$(mktemp -d); rm -rf "$d"', "node -e \"fetch('http://127.0.0.1')\""]) {
+    const result = await $.tool.check({ tool: 'Bash', input: { command } })
+    expect(result.decision).toBe('allow')
+  }
+  const script = await $.tool.check({ tool: 'REPL', input: { code: 'process.exit(0)' } })
+  expect(script.decision).toBe('allow')
 })
 
 test('output goes whole to the tool and only eligible read text in the transcript is reduced',

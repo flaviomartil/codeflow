@@ -42,7 +42,6 @@ export interface SessionTelemetry {
   peakContextPercent: number | null
   usageSeen: boolean
   trimmedChars: number
-  guardedAsks: number
   stashes: number
   thinkingBlocks: number
   thinkingWords: number
@@ -72,7 +71,6 @@ export function newSessionTelemetry(): SessionTelemetry {
     peakContextPercent: null,
     usageSeen: false,
     trimmedChars: 0,
-    guardedAsks: 0,
     stashes: 0,
     thinkingBlocks: 0,
     thinkingWords: 0,
@@ -231,7 +229,6 @@ export function telemetryExport(session: SessionTelemetry, contextNow: ContextSn
     peakContextPercent: session.peakContextPercent,
     contextNow,
     trimmedChars: session.trimmedChars,
-    guardedAsks: session.guardedAsks,
     stashes: session.stashes,
     thinking: { blocks: session.thinkingBlocks, words: session.thinkingWords },
   }

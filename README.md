@@ -40,7 +40,7 @@ CLAUDE_CODEFLOW_ENABLED=1 claude
 claude --plugin-dir ./codeflow
 ```
 
-The first command opens an installed Codeflow in **active mode**. The second loads a local checkout without installing it. Active mode adds guidance to the prompt, reduces eligible `Read`, `Grep` and `Glob` results and flags sensitive patterns in `Bash` and `REPL`. The variable is read from the environment at startup. A missing value, an invalid value or `0` keeps passive mode.
+The first command opens an installed Codeflow in **active mode**. The second loads a local checkout without installing it. Active mode adds guidance to the prompt and reduces eligible `Read`, `Grep` and `Glob` results. It never changes a permission decision. The variable is read from the environment at startup. A missing value, an invalid value or `0` keeps passive mode.
 
 ## Commands
 
@@ -68,7 +68,6 @@ The options below live in the plugin configuration.
 | `maxFileLines` | 200 |
 | `maxToolResultChars` | 2,000. Values below 64 use the default. |
 | `maxListItems` | 20 |
-| `guardPatterns` | Empty. Additional comma-separated patterns. |
 | `turnSummary` | On |
 | `thinking` | Off. When on, it keeps counts. |
 | `sessionLog` | Off. When on, it writes a summary to `.codeflow/session-<id>.ndjson` on exit. |

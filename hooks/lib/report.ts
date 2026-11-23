@@ -76,7 +76,7 @@ export function buildTelemetryReport(
     lines.push('estimated session cost (USD): ' + format(context.costUsd, 6))
   }
   lines.push('characters removed from results: ' + format(session.trimmedChars))
-  lines.push('flagged calls: ' + session.guardedAsks + ' · stash entries: ' + session.stashes)
+  lines.push('stash entries: ' + session.stashes)
   if (run) {
     lines.push('', 'Experiment ' + run + ' · sessions ended in the last 24 h')
     for (const enabled of [true, false]) {
