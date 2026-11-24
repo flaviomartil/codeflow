@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { snapshotContext, newSessionTelemetry } from './telemetry'
 import {
-  contextKey, dayOf, isLedgerEntry, ledgerKey, MAIN_AGENT, mergeEntries, newLedgerEntry, recordRequest,
+  contextKey, dayOf, isContextSnapshot, isLedgerEntry, ledgerKey, MAIN_AGENT, mergeEntries, newLedgerEntry, recordRequest,
   saveLedgerEntry, SNAPSHOT_EVERY_MS, UNKNOWN_SUBAGENT, type ContextSnapshot, type LedgerEntry, type PlanWindow,
 } from './ledger'
 
@@ -17,6 +17,7 @@ export interface SpendSession {
   mainInputSince: number
   model: string | null
   lastCategories: Array<[string, number]> | null
+  snapshotUses: number | null
   agentTypes: Map<string, string>
   pending: Promise<void>
 }
@@ -37,6 +38,7 @@ export function newSpendSession(): SpendSession {
     mainInputSince: 0,
     model: null,
     lastCategories: null,
+    snapshotUses: null,
     agentTypes: new Map<string, string>(),
     pending: Promise.resolve(),
   }
@@ -160,6 +162,11 @@ async function flushNow(spend: SpendSession, $: EngineInterface, allowSnapshot: 
     if (snapshot !== null) {
       if (applyMix(entry, snapshot.categories, spend.mainInputSince)) spend.mainInputSince = 0
       spend.lastCategories = snapshot.categories
+      if (spend.snapshotUses === null) {
+        const stored = await attempt(() => $.store.get(contextKey(entry.project)), null)
+        spend.snapshotUses = (isContextSnapshot(stored) ? stored.uses ?? 1 : 0) + 1
+      }
+      snapshot.uses = spend.snapshotUses
       await attempt(() => $.store.set(contextKey(entry.project), snapshot), undefined)
       spend.snapshotAtMs = now
     }
@@ -260,6 +267,7 @@ export function endSpendSession(spend: SpendSession, $: EngineInterface): Promis
     spend.mainInputSince = 0
     spend.model = null
     spend.lastCategories = null
+    spend.snapshotUses = null
     spend.agentTypes.clear()
   })
 }

@@ -1278,7 +1278,7 @@ test('why command accepts no argument or a day count and rejects anything else',
   await $.turn.complete(completion)
   const today = await $.command.run({ ...command, args: 'why' })
   expect(today.text).toContain('Codeflow why · last 1 day(s)')
-  expect(today.text).toContain('Spent USD')
+  expect(today.text).toContain('Spent ≈ USD')
   const week = await $.command.run({ ...command, args: 'why 7' })
   expect(week.text).toContain('Codeflow why · last 7 day(s)')
   for (const args of ['why x', 'why 0', 'why 3 4', 'why model']) {
@@ -1378,4 +1378,42 @@ test('subagent cache writes are repriced at the main model 1-hour rate in the de
   addRequest(entry, 'Explore', 'claude-haiku-5-5', { input_tokens: 0, cache_creation_input_tokens: 1_000_000 }, false)
   const delegation = buildWhyReport([entry], [], [entry], 1, WHY_NOW).split('\n').at(-1) ?? ''
   expect(delegation).toBe('Delegation: subagents ≈ USD 0.625 (6% of spend); the same tokens on claude-fable-5-5 ≈ USD 20.00')
+})
+
+test('why header is an estimate when a session cost is zero, and exact when every cost is real', () => {
+  const day = dayOf(1_800_000_000_000)
+  const zero = newLedgerEntry(day, 'z1', '/work/a', 1)
+  zero.costUsd = 0
+  addRequest(zero, 'main', 'claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 0 })
+  const estimated = buildWhyReport([zero], [], [zero], 1, 1_800_000_000_000)
+  expect(estimated).toContain('Spent ≈ USD 4.00')
+  expect(estimated).toContain('main 100% (≈ USD 4.00)')
+  const paid = newLedgerEntry(day, 'p1', '/work/a', 1)
+  paid.costUsd = 2
+  addRequest(paid, 'main', 'claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 0 })
+  expect(buildWhyReport([paid], [], [paid], 1, 1_800_000_000_000)).toContain('Spent USD 2.00')
+  expect(buildSpendReport([zero], 'project', 1)).toContain('≈ USD 4.00')
+})
+
+test('snapshot pruning keeps the projects used by the most sessions before the most recent ones', async () => {
+  const data = new Map<string, unknown>()
+  const snapshot = (project: string, atMs: number, uses: number) => ({
+    version: 1, project, atMs, model: 'm', categories: [], mcpServers: [], memoryFiles: [], skills: null, agents: { count: 0, tokens: 0 }, uses,
+  })
+  const now = 1_800_000_000_000
+  data.set('codeflow:context:v1:/work/main', snapshot('/work/main', now - 5 * 86_400_000, 40))
+  for (let i = 0; i < 24; i += 1) data.set('codeflow:context:v1:/wt/' + i, snapshot('/wt/' + i, now - i * 1000, 1))
+  const $ = {
+    store: {
+      keys: async () => [...data.keys()],
+      get: async (key: string) => data.get(key),
+      set: async (key: string, value: unknown) => { data.set(key, value) },
+      delete: async (key: string) => { data.delete(key) },
+    },
+  }
+  await pruneLedger($ as never, now, () => true)
+  expect(data.size).toBe(20)
+  expect(data.has('codeflow:context:v1:/work/main')).toBe(true)
+  expect(data.has('codeflow:context:v1:/wt/0')).toBe(true)
+  expect(data.has('codeflow:context:v1:/wt/23')).toBe(false)
 })

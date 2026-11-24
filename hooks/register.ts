@@ -259,7 +259,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     return {
       text: [
-        'Codeflow 1.3.0',
+        'Codeflow 1.3.1',
         toggle.enabled ? 'Active mode' : 'Passive mode',
         toggle.invalid ? 'Invalid CLAUDE_CODEFLOW_ENABLED. Use 0 or 1.' : '',
         'Use /codeflow report to see session usage.',

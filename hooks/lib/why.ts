@@ -153,13 +153,12 @@ export function buildWhyReport(
   nowMs: number,
 ): string {
   if (entries.length === 0) return `Codeflow why · no recorded requests in the last ${days} day(s)`
-  const hasReal = entries.some(entry => entry.costUsd !== null)
-  const realSpent = entries.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0)
+  const allReal = entries.every(entry => entry.costUsd !== null && entry.costUsd > 0)
   const agentRows = aggregate(entries, 'agent')
   const approxSpent = agentRows.reduce((sum, row) => sum + row.approxUsd, 0)
-  const spent = hasReal ? realSpent : approxSpent
+  const spent = approxSpent
   const rate = calibrationRate(calibrationEntries, nowMs)
-  const parts = [`Spent ${hasReal ? 'USD' : '≈ USD'} ${usd(spent)}`]
+  const parts = [`Spent ${allReal ? 'USD' : '≈ USD'} ${usd(spent)}`]
   parts.push(rate === null
     ? 'plan share not measured yet'
     : `≈ ${oneDecimal(spent * rate)}% of the 7-day plan window (1% ≈ USD ${(1 / rate).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, measured on this machine)`)

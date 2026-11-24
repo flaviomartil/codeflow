@@ -46,6 +46,7 @@ export interface ContextSnapshot {
   memoryFiles: Array<[string, number]>
   skills: { count: number; tokens: number } | null
   agents: { count: number; tokens: number }
+  uses?: number
 }
 
 export interface RequestResult {
@@ -482,7 +483,7 @@ function spendLine(label: string, sessions: number | null, row: Figures, grand: 
     'output ' + count(row.output),
     percent(grand === 0 ? 0 : (totalTokens(row) / grand) * 100) + '% of tokens',
   )
-  if (row.costUsd !== null) parts.push('USD ' + usd(row.costUsd))
+  if (row.costUsd !== null && row.costUsd > 0) parts.push('USD ' + usd(row.costUsd))
   else if (row.approxUsd > 0) parts.push('≈ USD ' + usd(row.approxUsd))
   return parts.join(' · ')
 }
@@ -629,7 +630,7 @@ export async function pruneLedger($: EngineInterface, nowMs: number, hasTime: ()
     if (!hasTime()) return
     await $.store.delete(key).catch(() => undefined)
   }
-  const snapshots: Array<{ key: string; atMs: number }> = []
+  const snapshots: Array<{ key: string; atMs: number; uses: number }> = []
   for (const key of keys) {
     if (!key.startsWith(CONTEXT_PREFIX)) continue
     if (!hasTime()) return
@@ -640,9 +641,9 @@ export async function pruneLedger($: EngineInterface, nowMs: number, hasTime: ()
       await $.store.delete(key).catch(() => undefined)
       continue
     }
-    snapshots.push({ key, atMs: value.atMs })
+    snapshots.push({ key, atMs: value.atMs, uses: value.uses ?? 1 })
   }
-  snapshots.sort((a, b) => b.atMs - a.atMs)
+  snapshots.sort((a, b) => b.uses - a.uses || b.atMs - a.atMs)
   for (const stale of snapshots.slice(MAX_SNAPSHOTS)) {
     if (!hasTime()) return
     await $.store.delete(stale.key).catch(() => undefined)
