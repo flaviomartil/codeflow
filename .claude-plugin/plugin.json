@@ -1,6 +1,6 @@
 {
   "name": "codeflow",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Turn telemetry and an opt-in context reduction experiment for Claude Code",
   "author": { "name": "Codeflow" },
   "userConfig": {
@@ -39,6 +39,12 @@
       "title": "Save summary on exit",
       "description": "Writes a numeric session summary to .codeflow in the project.",
       "default": false
+    },
+    "spendLedger": {
+      "type": "boolean",
+      "title": "Spend ledger",
+      "description": "Keeps token and cost totals per project, day, model and agent for 30 days in the plugin store.",
+      "default": true
     }
   }
 }

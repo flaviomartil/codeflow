@@ -52,14 +52,17 @@ The first command opens an installed Codeflow in **active mode**. The second loa
 | `/codeflow stash <name> <text>` | Keeps text chosen in the terminal in memory for up to 30 minutes, in active mode |
 | `/codeflow recall <name>` | Shows the stored value |
 | `/codeflow forget <name>` | Removes the entry |
+| `/codeflow spend [project\|day\|model\|agent] [days]` | Tokens and cost from the spend ledger. The dimension and the day count are optional and can come in either order. Defaults: `project`, 7 days, up to 30 |
 
 The stash accepts up to 20 entries of up to 2,000 characters each. It is cleared when the session ends or is cleared. Text typed in commands may appear in the Claude session history.
+
+`/codeflow spend` reads the spend ledger, a record kept only in the local plugin store and never sent anywhere. For each local day and session it keeps: the absolute project path, the session ids, model ids, subagent types (`main` for the main loop), token totals per row, and the session USD. USD is the session total and also covers requests that have no step (compaction, titles), so it is not a per-row price. Once a day is older than yesterday, its session entries are folded into one entry per project that keeps the ids of the sessions folded into it and the totals, and entries older than 30 days are removed. Requests are dated by the local day their turn started. Turn it off with the `spendLedger` option; stored entries stay until the ledger is on again, and then they age out.
 
 ## Measurement and storage
 
 Event counting is the same in both modes. Total input adds uncached input, cache read and cache created. The request count for requests with multiple tools uses the model step response. Reports show the duration of completed turns and the total number of turns observed. Unavailable fields appear as such.
 
-By default, collection stays in memory. Set `CLAUDE_CODEFLOW_RUN` if you want to group sessions for a comparison. The record uses one key per session and includes only telemetry data. The report uses sessions that ended in the last 24 hours with the same experiment ID. See the [A/B procedure](docs/hybrid-ab-test.md).
+By default, turn telemetry stays in memory; the spend ledger (see `/codeflow spend` under Commands) is the only record kept in the plugin store without `CLAUDE_CODEFLOW_RUN`. Set `CLAUDE_CODEFLOW_RUN` if you want to group sessions for a comparison. The experiment registry uses one key per session and includes only telemetry data. The report uses sessions that ended in the last 24 hours with the same experiment ID. See the [A/B procedure](docs/hybrid-ab-test.md).
 
 The options below live in the plugin configuration.
 
@@ -71,6 +74,7 @@ The options below live in the plugin configuration.
 | `turnSummary` | On |
 | `thinking` | Off. When on, it keeps counts. |
 | `sessionLog` | Off. When on, it writes a summary to `.codeflow/session-<id>.ndjson` on exit. |
+| `spendLedger` | On. Keeps token and cost totals per project, day, model and agent for 30 days in the plugin store. |
 
 ## Compare with and without Codeflow
 

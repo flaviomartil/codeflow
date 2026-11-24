@@ -10,6 +10,10 @@ import {
 } from './lib/telemetry'
 import { buildTelemetryReport, buildThinkingDigest, buildTurnSummaryLine } from './lib/report'
 import { entryFromSession, readRegistry, saveEntry } from './lib/registry'
+import { buildSpendReport, compactLedger, parseSpendArgs, pruneLedger, readLedger } from './lib/ledger'
+import {
+  endSpendSession, flushSpend, markTurnDay, newSpendSession, recordStep, startSpendSession,
+} from './lib/spend-session'
 
 interface CodeflowOptions {
   maxFileLines?: number
@@ -18,6 +22,7 @@ interface CodeflowOptions {
   turnSummary?: boolean
   thinking?: boolean
   sessionLog?: boolean
+  spendLedger?: boolean
 }
 
 function positiveLimit(value: number | undefined, fallback: number, minimum = 1): number {
@@ -37,12 +42,14 @@ export function register(on: On, options: CodeflowOptions = {}) {
   const showSummary = options.turnSummary !== false
   const countThinking = options.thinking === true
   const sessionLog = options.sessionLog === true
+  const spendLedger = options.spendLedger !== false
   let toggle = resolveToggle(undefined)
   let runId: string | null = null
   let cwd = ''
   let telemetry = newSessionTelemetry()
   const stash = new Map<string, CacheEntry>()
   const outputKinds = new Map<string, 'Read' | 'Grep' | 'Glob'>()
+  const spend = newSpendSession()
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -50,6 +57,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
     const run = await $.env.get('CLAUDE_CODEFLOW_RUN').catch(() => undefined)
     runId = run && /^[A-Za-z0-9_-]{1,48}$/.test(run) ? run : null
     await $.command.register({ name: 'codeflow', description: 'Codeflow telemetry, active mode and local state' })
+    if (spendLedger) await startSpendSession(spend, $).catch(() => undefined)
     return next(e)
   })
 
@@ -70,6 +78,13 @@ export function register(on: On, options: CodeflowOptions = {}) {
       outputKinds.clear()
       telemetry.current = newTurnTelemetry(result.turnId, null)
     }
+    if (spendLedger) await markTurnDay(spend, $).catch(() => undefined)
+    return result
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e)
+    if (typeof result.agentId === 'string') spend.agentTypes.set(result.agentId, e.subagentType)
     return result
   })
 
@@ -82,11 +97,13 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     const result = yield* next(e)
     if (mainTurn && (result.toolUses?.length ?? 0) > 1) mainTurn.multiToolRequests += 1
+    if (spendLedger && result.usage) await recordStep(spend, $, cwd, e, result.usage).catch(() => undefined)
     return result
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId === undefined) await flushSpend(spend, $).catch(() => undefined)
     if (e.agentId !== undefined || telemetry.current?.turnId !== e.turnId) return result
     const turn = finalizeTurnTelemetry(telemetry, e, null)
     const context = await currentContext($, telemetry)
@@ -160,14 +177,31 @@ export function register(on: On, options: CodeflowOptions = {}) {
         await $.fs.write(path, JSON.stringify(telemetryExport(finished, context)) + '\n').catch(() => undefined)
       }
     }
-    return next(e)
+    await endSpendSession(spend, $).catch(() => undefined)
+    const result = await next(e)
+    if (spendLedger) {
+      const now = await $.clock.now()
+      const hasTime = () => next.budget.remainingMs > 500
+      await pruneLedger($, now, hasTime).catch(() => undefined)
+      await compactLedger($, now, hasTime).catch(() => undefined)
+    }
+    return result
   })
 
   on('command.run', { command: 'codeflow' }, async ($, e) => {
-    const [sub = '', name = ''] = e.args.trim().split(/\s+/)
+    const words = e.args.trim().split(/\s+/)
+    const [sub = '', name = ''] = words
     if (sub === 'report') {
       const registry = runId ? await readRegistry($, runId, await $.clock.now()) : []
       return { text: buildTelemetryReport(toggle, runId, registry, telemetry, await currentContext($, telemetry)) }
+    }
+    if (sub === 'spend') {
+      if (!spendLedger) return { text: 'The spend ledger is off. Enable spendLedger in the plugin options.' }
+      const spendArgs = parseSpendArgs(words.slice(1).filter(word => word !== ''))
+      if (spendArgs === null) return { text: 'Use /codeflow spend [project|day|model|agent] [days].' }
+      await flushSpend(spend, $).catch(() => undefined)
+      const entries = await readLedger($, await $.clock.now(), spendArgs.days)
+      return { text: buildSpendReport(entries, spendArgs.by, spendArgs.days) }
     }
     if (sub === 'thinking') {
       const last = telemetry.turns.at(-1) ?? telemetry.current
@@ -197,10 +231,11 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     return {
       text: [
-        'Codeflow 1.1.2',
+        'Codeflow 1.2.0',
         toggle.enabled ? 'Active mode' : 'Passive mode',
         toggle.invalid ? 'Invalid CLAUDE_CODEFLOW_ENABLED. Use 0 or 1.' : '',
         'Use /codeflow report to see session usage.',
+        'Use /codeflow spend to see where tokens and cost went.',
         'Use Ctrl+O to inspect the native executor Code blocks.',
       ].filter(Boolean).join('\n'),
     }
