@@ -10,13 +10,13 @@ import {
 } from './lib/telemetry'
 import { buildTelemetryReport, buildThinkingDigest, buildTurnSummaryLine } from './lib/report'
 import { entryFromSession, readRegistry, saveEntry } from './lib/registry'
+import { compactLedger, LEDGER_RETENTION_DAYS, parseSpendArgs, pruneLedger, readLedger } from './lib/ledger'
 import {
-  buildCompareReport, buildSpendReport, compactLedger, LEDGER_RETENTION_DAYS, parseSpendArgs, pruneLedger,
-  readLedger, readSnapshots,
-} from './lib/ledger'
-import { buildWhyReport } from './lib/why'
+  COMPARE_USAGE, parseSpendToolInput, SPEND_DENIED, SPEND_FAILED, SPEND_NEEDS_PERMISSION, SPEND_OFF,
+  SPEND_TOOL_USAGE, spendText, spendToolArguments, SPEND_USAGE, WHY_USAGE,
+} from './lib/reports'
 import {
-  endSpendSession, flushSpend, markTurnDay, newSpendSession, recordStep, startSpendSession,
+  endSpendSession, flushSpend, markTurnDay, newSpendSession, readSessionCost, recordStep, startSpendSession,
 } from './lib/spend-session'
 
 interface CodeflowOptions {
@@ -29,6 +29,20 @@ interface CodeflowOptions {
   spendLedger?: boolean
 }
 
+const SPEND_TOOL = 'mcp__codeflow__spend_report'
+const SPEND_TOOL_NAME = 'spend_report'
+const SPEND_TOOL_DESCRIPTION = "Read-only token and cost report for this machine's Claude Code sessions, from the Codeflow spend ledger. Use it when the user asks what a session, day or project cost, what share of the plan it used, which agent, model or part of the context weighed most, or whether delegating to subagents paid off. report \"why\" gives spend, plan share, agent split, context mix and the delegation comparison; \"spend\" lists tokens and cost by a dimension; \"compare\" lists per-request averages by a dimension. USD is Claude Code's list-price cost, not a subscription bill."
+const SPEND_TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    report: { type: 'string', enum: ['why', 'spend', 'compare'] },
+    by: { type: 'string', enum: ['project', 'day', 'model', 'agent', 'tag'] },
+    days: { type: 'integer', minimum: 1, maximum: 30 },
+  },
+  required: ['report'],
+  additionalProperties: false,
+}
+
 function positiveLimit(value: number | undefined, fallback: number, minimum = 1): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum ? value : fallback
 }
@@ -36,10 +50,6 @@ function positiveLimit(value: number | undefined, fallback: number, minimum = 1)
 async function currentContext($: EngineInterface, session: ReturnType<typeof newSessionTelemetry>) {
   return snapshotContext(await $.session.usage().catch(() => null), session)
 }
-
-const SPEND_USAGE = 'Use /codeflow spend [project|day|model|agent|tag] [days].'
-const COMPARE_USAGE = 'Use /codeflow compare [project|day|model|agent|tag] [days].'
-const WHY_USAGE = 'Use /codeflow why [days].'
 
 export function register(on: On, options: CodeflowOptions = {}) {
   const limits = {
@@ -58,6 +68,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
   const stash = new Map<string, CacheEntry>()
   const outputKinds = new Map<string, 'Read' | 'Grep' | 'Glob'>()
   const spend = newSpendSession()
+  let turnCostStart: number | null = null
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -65,7 +76,15 @@ export function register(on: On, options: CodeflowOptions = {}) {
     const run = await $.env.get('CLAUDE_CODEFLOW_RUN').catch(() => undefined)
     runId = run && /^[A-Za-z0-9_-]{1,48}$/.test(run) ? run : null
     await $.command.register({ name: 'codeflow', description: 'Codeflow telemetry, active mode and local state' })
-    if (spendLedger) await startSpendSession(spend, $).catch(() => undefined)
+    if (spendLedger) {
+      await $.tool.register({
+        name: SPEND_TOOL_NAME,
+        description: SPEND_TOOL_DESCRIPTION,
+        inputSchema: SPEND_TOOL_SCHEMA,
+        isDeferred: true,
+      }).catch(() => undefined)
+      await startSpendSession(spend, $).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -85,6 +104,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
     if (e.agentId === undefined) {
       outputKinds.clear()
       telemetry.current = newTurnTelemetry(result.turnId, null)
+      turnCostStart = await readSessionCost($)
     }
     if (spendLedger) await markTurnDay(spend, $).catch(() => undefined)
     return result
@@ -105,15 +125,29 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     const result = yield* next(e)
     if (mainTurn && (result.toolUses?.length ?? 0) > 1) mainTurn.multiToolRequests += 1
-    if (spendLedger && result.usage) await recordStep(spend, $, cwd, e, result.usage).catch(() => undefined)
+    if (spendLedger && result.usage) {
+      const rebuild = await recordStep(spend, $, cwd, e, result.usage).catch(() => null)
+      if (rebuild !== null && mainTurn) {
+        mainTurn.rebuilds += 1
+        mainTurn.rebuildTokens += rebuild.tokens
+        mainTurn.rebuildUsd += rebuild.est
+      }
+    }
     return result
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined) await flushSpend(spend, $).catch(() => undefined)
+    let endCost: number | null = null
+    if (e.agentId === undefined) {
+      endCost = await flushSpend(spend, $).catch(() => null)
+      if (!spendLedger) endCost = await readSessionCost($)
+    }
     if (e.agentId !== undefined || telemetry.current?.turnId !== e.turnId) return result
+    const startCost = turnCostStart
+    turnCostStart = null
     const turn = finalizeTurnTelemetry(telemetry, e, null)
+    if (turn) turn.turnUsd = startCost !== null && endCost !== null && endCost - startCost > 0 ? endCost - startCost : null
     const context = await currentContext($, telemetry)
     outputKinds.clear()
     if (!showSummary || !turn) return result
@@ -124,13 +158,24 @@ export function register(on: On, options: CodeflowOptions = {}) {
 
   on('tool.call', async ($, e, next) => {
     if (e.agentId === undefined) countToolCall(telemetry, e.tool)
+    if ((e.tool as string) === SPEND_TOOL) {
+      const verdict = await $.tool.check({ tool: SPEND_TOOL, input: spendToolArguments(e) }).catch(() => null)
+      if (verdict === null || verdict.decision === 'ask') return { deny: SPEND_NEEDS_PERMISSION }
+      if (verdict.decision === 'deny') return { deny: verdict.reason ?? SPEND_DENIED }
+      if (verdict.decision !== 'allow') return { deny: SPEND_NEEDS_PERMISSION }
+      if (!spendLedger) return { result: SPEND_OFF }
+      const request = parseSpendToolInput(e as unknown as Record<string, unknown>)
+      if (request === null) return { result: SPEND_TOOL_USAGE }
+      await flushSpend(spend, $).catch(() => null)
+      return { result: await spendText($, request.kind, request.by, request.days) }
+    }
     const turn = telemetry.current
     const result = await next(e)
     if (!toggle.enabled || e.agentId !== undefined || !turn || turn !== telemetry.current) return result
     if (!e.tool_use_id || result.isError || result.deny !== undefined) return result
     if (e.tool === 'Read' || e.tool === 'Grep' || e.tool === 'Glob') outputKinds.set(e.tool_use_id, e.tool)
     return result
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (e.tool as string) === SPEND_TOOL ? { result: SPEND_FAILED } : next(e))
 
   on('session.append', { door: 'tool-result' }, ($, e, next) => {
     if (!toggle.enabled || e.agentId !== undefined || outputKinds.size === 0) return next(e)
@@ -186,6 +231,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
       }
     }
     await endSpendSession(spend, $).catch(() => undefined)
+    turnCostStart = null
     const result = await next(e)
     if (spendLedger) {
       const now = await $.clock.now()
@@ -204,32 +250,21 @@ export function register(on: On, options: CodeflowOptions = {}) {
       return { text: buildTelemetryReport(toggle, runId, registry, telemetry, await currentContext($, telemetry)) }
     }
     if (sub === 'spend' || sub === 'compare') {
-      if (!spendLedger) return { text: 'The spend ledger is off. Enable spendLedger in the plugin options.' }
+      if (!spendLedger) return { text: SPEND_OFF }
       const compare = sub === 'compare'
       const spendArgs = parseSpendArgs(words.slice(1).filter(word => word !== ''), compare ? 'tag' : 'project')
-      if (spendArgs === null) {
-        return { text: compare ? COMPARE_USAGE : SPEND_USAGE }
-      }
-      await flushSpend(spend, $).catch(() => undefined)
-      const entries = await readLedger($, await $.clock.now(), spendArgs.days)
-      return {
-        text: compare
-          ? buildCompareReport(entries, spendArgs.by, spendArgs.days)
-          : buildSpendReport(entries, spendArgs.by, spendArgs.days),
-      }
+      if (spendArgs === null) return { text: compare ? COMPARE_USAGE : SPEND_USAGE }
+      await flushSpend(spend, $).catch(() => null)
+      return { text: await spendText($, compare ? 'compare' : 'spend', spendArgs.by, spendArgs.days) }
     }
     if (sub === 'why') {
-      if (!spendLedger) return { text: 'The spend ledger is off. Enable spendLedger in the plugin options.' }
+      if (!spendLedger) return { text: SPEND_OFF }
       const args = words.slice(1).filter(word => word !== '')
       if (args.length > 1 || (args.length === 1 && !/^\d+$/.test(args[0] ?? ''))) return { text: WHY_USAGE }
       const days = args.length === 0 ? 1 : Math.min(LEDGER_RETENTION_DAYS, Number(args[0]))
       if (days < 1) return { text: WHY_USAGE }
-      await flushSpend(spend, $).catch(() => undefined)
-      const now = await $.clock.now()
-      const entries = await readLedger($, now, days)
-      const calibration = await readLedger($, now, LEDGER_RETENTION_DAYS)
-      const snapshots = await readSnapshots($)
-      return { text: buildWhyReport(entries, snapshots, calibration, days, now) }
+      await flushSpend(spend, $).catch(() => null)
+      return { text: await spendText($, 'why', 'project', days) }
     }
     if (sub === 'thinking') {
       const last = telemetry.turns.at(-1) ?? telemetry.current
@@ -259,7 +294,7 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     return {
       text: [
-        'Codeflow 1.3.1',
+        'Codeflow 1.4.0',
         toggle.enabled ? 'Active mode' : 'Passive mode',
         toggle.invalid ? 'Invalid CLAUDE_CODEFLOW_ENABLED. Use 0 or 1.' : '',
         'Use /codeflow report to see session usage.',

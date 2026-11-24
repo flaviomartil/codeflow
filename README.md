@@ -42,10 +42,10 @@ Restart open sessions after installing or updating. A running session keeps the 
 Install it and keep working. Codeflow starts in **passive mode**, which only measures. Each response ends with a line like this:
 
 ```text
-Codeflow · 968.077 s · 45 request(s) · 44 call(s) · total input 9,980,142 · new input 92 · cache read 9,734,921 · cache created 245,129 · output 22,923 · context 24%
+Codeflow · 968.077 s · 45 request(s) · 44 call(s) · total input 9,980,142 · new input 92 · cache read 9,734,921 · cache created 245,129 · output 22,923 · turn USD 0.4213 · cache rebuilt 120,000 tok ≈ USD 0.72 write cost · context 24%
 ```
 
-`total input` is new input plus cache read plus cache created. A high `cache created` figure means the prompt cache was rebuilt, which costs more than a cache read.
+The line above is an example. `total input` is new input plus cache read plus cache created. A high `cache created` figure means the prompt cache was rebuilt, which costs more than a cache read. `turn USD` is the change in the session cost over the turn, so it includes background agents and side requests that ran meanwhile; it appears only when the turn cost something. `cache rebuilt` appears when the main loop wrote a large part of the prompt to the cache again instead of reading it. It usually happens when the cache expired after a pause, or when something changed the start of the prompt, such as a plugin or MCP server reloading.
 
 After a few sessions, ask where the spend went:
 
@@ -98,6 +98,8 @@ For each session and local day it keeps the absolute project path, the session i
 
 Once a day is older than yesterday, its sessions are folded into one entry per project and tag, which keeps the totals, the estimates, the startup sizes, the plan window percentages, the context mix and the ids of the folded sessions. Entries older than 30 days are deleted.
 
+It also keeps, per day and session, the count, tokens and estimated cost of cache rebuilds in the main loop, which the summary line and `/codeflow why` report.
+
 For `/codeflow why` it also keeps, per project, one snapshot of the fixed context: the largest memory file paths, the loaded MCP server names with their token counts, and the skills and agents totals. Each new snapshot replaces the previous one for that project, and snapshots older than 30 days are deleted.
 
 To turn the ledger off, set the `spendLedger` option to off in the plugin configuration. Entries already stored stay until the ledger is on again, and then they age out.
@@ -123,10 +125,22 @@ Delegation: subagents ≈ USD 0.0221 (24% of spend); the same tokens on claude-h
 - **7-day window** and **5-hour window** show the latest percentage Claude Code reported for a window that has not reset yet. The 5-hour line appears only when Claude Code reports that window.
 - **By agent** splits the estimated cost across the main loop and each subagent type. Each row's share is its list-price weight of the session's tokens.
 - **Main-loop context** shows which parts of the context the main loop's input tokens went to, as `/context` estimates them. It is the share of input tokens, not a price per item.
+- **Cache rebuilds** appears only when the window has any. It counts the main-loop requests that wrote at least 50,000 tokens to the cache while the cache read fell below half the previous request's prompt, with the new prompt at least half that size. A prompt that shrank, as after `/clear` or compaction, is not counted, and neither is a large new tool result, which keeps the cache read near the previous prompt. The first request of a fresh session is not counted. The estimate, shown as write cost, uses the 1-hour cache write price and the same share of the session cost as the other estimates. The usual causes are a cache that expired after a pause, or a change at the start of the prompt such as a plugin or MCP server reloading.
 - **Largest fixed items** come from the snapshot of the highest-spend project in the window that has one. It lists the largest memory files, loaded MCP servers, the skills listing, custom agents and the system prompt and tools, then the fixed context each request carries before any message.
 - **Delegation** reprices the subagents' tokens at the main model's list prices, with their cache writes at the main model's 1-hour rate. It is an indication, not a bound: another model would not use the same number of tokens, and the main loop's context would grow with that work.
 
-The context mix and the fixed items are estimates from a snapshot taken at most every five minutes, and at the end of each session. Nothing here is sent anywhere; the snapshot includes memory file paths and MCP server names, so it stays on this machine with the rest of the ledger.
+The context mix and the fixed items are estimates from a snapshot taken at most every five minutes, at the end of a turn. Nothing here is sent anywhere; the snapshot includes memory file paths and MCP server names, so it stays on this machine with the rest of the ledger.
+
+## Ask the agent
+
+Codeflow adds a tool the agent can call: `mcp__codeflow__spend_report`. It is read-only and deferred, so it costs no context until the agent uses it. Ask in plain language, for example:
+
+- "Was delegating to subagents worth it today?"
+- "What did this project cost this week, and how much of the plan did it use?"
+
+The agent picks the report (`why`, `spend` or `compare`) and, when it needs them, a dimension and a number of days.
+
+The tool answers only when your permission rules allow `mcp__codeflow__spend_report`. Before it answers, Codeflow asks Claude Code's permission decision for that call. A deny rule is honoured: the agent gets the refusal and no report. Where the decision is to ask, the tool refuses with a message that says it needs permission, because Codeflow cannot hand that question to Claude Code's dialog for a tool it answers itself. To use the tool, allow it in your Claude Code permission settings, for example by adding `mcp__codeflow__spend_report` to the allow list. Codeflow never changes a permission decision itself. USD in the answers is Claude Code's list-price cost, not a subscription bill.
 
 ## Session report
 

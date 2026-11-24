@@ -15,6 +15,12 @@ export interface StartupSummary {
   input: number
 }
 
+export interface RebuildSummary {
+  count: number
+  tokens: number
+  est: number
+}
+
 export interface PlanWindow {
   from: number
   to: number
@@ -34,6 +40,7 @@ export interface LedgerEntry {
   startup?: StartupSummary
   plan?: Record<string, PlanWindow>
   mix?: Record<string, number>
+  rebuild?: RebuildSummary
 }
 
 export interface ContextSnapshot {
@@ -51,7 +58,13 @@ export interface ContextSnapshot {
 
 export interface RequestResult {
   totalInput: number
+  input: number
+  cacheRead: number
+  cacheCreation: number
+  model: string
 }
+
+export const REBUILD_MIN_TOKENS = 50_000
 
 export interface Figures {
   requests: number
@@ -205,7 +218,13 @@ export function recordRequest(
   bucket.cacheCreation += cacheCreation
   bucket.est = previous + estimateUsd(name, tokens)
   entry.rows[key] = bucket
-  return { totalInput: tokens.input + tokens.cacheRead + cacheCreation }
+  return {
+    totalInput: tokens.input + tokens.cacheRead + cacheCreation,
+    input: tokens.input,
+    cacheRead: tokens.cacheRead,
+    cacheCreation,
+    model: name,
+  }
 }
 
 export function addRequest(
@@ -254,6 +273,31 @@ function mergePlan(base: Record<string, PlanWindow> | undefined, extra: Record<s
   return result
 }
 
+export function isRebuild(cacheCreation: number, cacheRead: number): boolean {
+  return cacheCreation >= REBUILD_MIN_TOKENS && cacheCreation > cacheRead
+}
+
+export function isRebuildAgainst(previous: number, cacheCreation: number, cacheRead: number, totalInput: number): boolean {
+  return cacheCreation >= REBUILD_MIN_TOKENS && cacheRead < previous * 0.5 && totalInput >= previous * 0.5
+}
+
+export function rebuildEstimate(model: string, promptTokens: number, cacheCreation: number): number {
+  return costFor(priceFor(model, promptTokens), {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite5m: 0,
+    cacheWrite1h: cacheCreation,
+  })
+}
+
+function mergeRebuild(base: RebuildSummary | undefined, extra: RebuildSummary | undefined): RebuildSummary | undefined {
+  if (base === undefined && extra === undefined) return undefined
+  if (base === undefined) return extra
+  if (extra === undefined) return base
+  return { count: base.count + extra.count, tokens: base.tokens + extra.tokens, est: base.est + extra.est }
+}
+
 function mergeMix(base: Record<string, number> | undefined, extra: Record<string, number> | undefined): Record<string, number> | undefined {
   if (base === undefined && extra === undefined) return undefined
   const result: Record<string, number> = { ...(base ?? {}) }
@@ -286,6 +330,8 @@ export function mergeEntries(base: LedgerEntry, extra: LedgerEntry): LedgerEntry
   if (plan !== undefined) result.plan = plan
   const mix = mergeMix(base.mix, extra.mix)
   if (mix !== undefined) result.mix = mix
+  const rebuild = mergeRebuild(base.rebuild, extra.rebuild)
+  if (rebuild !== undefined) result.rebuild = rebuild
   return result
 }
 
@@ -312,6 +358,12 @@ function isPlan(value: unknown): value is Record<string, PlanWindow> {
   })
 }
 
+function isRebuildSummary(value: unknown): value is RebuildSummary {
+  if (value === null || typeof value !== 'object') return false
+  const summary = value as Record<string, unknown>
+  return typeof summary.count === 'number' && typeof summary.tokens === 'number' && typeof summary.est === 'number'
+}
+
 function isMix(value: unknown): value is Record<string, number> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   return Object.values(value as Record<string, unknown>).every(item => typeof item === 'number' && Number.isFinite(item))
@@ -329,6 +381,7 @@ export function isLedgerEntry(value: unknown): value is LedgerEntry {
   if (entry.startup !== undefined && !isStartup(entry.startup)) return false
   if (entry.plan !== undefined && !isPlan(entry.plan)) return false
   if (entry.mix !== undefined && !isMix(entry.mix)) return false
+  if (entry.rebuild !== undefined && !isRebuildSummary(entry.rebuild)) return false
   if (entry.rows === null || typeof entry.rows !== 'object' || Array.isArray(entry.rows)) return false
   return Object.values(entry.rows as Record<string, unknown>).every(isBucket)
 }

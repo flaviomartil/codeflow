@@ -3,6 +3,7 @@ import {
   type ContextSnapshot, type SessionTelemetry, type TurnTelemetry,
 } from './telemetry'
 import type { RegistryEntry } from './registry'
+import { usd } from './ledger'
 import type { Toggle } from './env'
 
 const UNAVAILABLE = 'Unavailable'
@@ -35,6 +36,8 @@ export function buildTurnSummaryLine(turn: TurnTelemetry, context: ContextSnapsh
     turn.modelRequests + ' request(s) · ' + turn.toolCalls + ' call(s)',
     tokenLine([turn]),
   ]
+  if (turn.turnUsd !== null && turn.turnUsd > 0) parts.push('turn USD ' + usd(turn.turnUsd))
+  if (turn.rebuilds > 0) parts.push('cache rebuilt ' + format(turn.rebuildTokens) + ' tok ≈ USD ' + usd(turn.rebuildUsd) + ' write cost')
   if (turn.multiToolRequests) parts.push(turn.multiToolRequests + ' request(s) with multiple tools')
   if (turn.thinking.blocks) parts.push(turn.thinking.blocks + ' reasoning block(s)')
   if (context?.percent != null) parts.push('context ' + format(context.percent) + '%')

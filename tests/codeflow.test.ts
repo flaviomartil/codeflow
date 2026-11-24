@@ -8,8 +8,10 @@ import {
   legacyCompactedKey, pruneLedger, readLedger, type ContextSnapshot, type LedgerEntry,
 } from '../hooks/lib/ledger'
 import { buildWhyReport } from '../hooks/lib/why'
+import { spendText } from '../hooks/lib/reports'
+import { buildTurnSummaryLine } from '../hooks/lib/report'
 import { estimateUsd, priceFor } from '../hooks/lib/prices'
-import { endSpendSession, flushSpend, newSpendSession, recordStep } from '../hooks/lib/spend-session'
+import { endSpendSession, flushSpend, newSpendSession, recordStep, startSpendSession } from '../hooks/lib/spend-session'
 
 const usage = {
   model: 'test-model',
@@ -1416,4 +1418,308 @@ test('snapshot pruning keeps the projects used by the most sessions before the m
   expect(data.has('codeflow:context:v1:/work/main')).toBe(true)
   expect(data.has('codeflow:context:v1:/wt/0')).toBe(true)
   expect(data.has('codeflow:context:v1:/wt/23')).toBe(false)
+})
+
+const spendToolSchema = {
+  type: 'object',
+  properties: {
+    report: { type: 'string', enum: ['why', 'spend', 'compare'] },
+    by: { type: 'string', enum: ['project', 'day', 'model', 'agent', 'tag'] },
+    days: { type: 'integer', minimum: 1, maximum: 30 },
+  },
+  required: ['report'],
+  additionalProperties: false,
+}
+
+test('the spend tool is registered deferred at session start', async ($, on) => {
+  mockSession(on)
+  const registered: Array<{ name: string; isDeferred?: boolean; inputSchema?: unknown }> = []
+  on('tool.register', ($, e) => {
+    registered.push(e)
+    return { value: { tool: 'mcp__codeflow__' + e.name } as never }
+  })
+  await $.session.start(start)
+  expect(registered).toHaveLength(1)
+  expect(registered[0]?.name).toBe('spend_report')
+  expect(registered[0]?.isDeferred).toBe(true)
+  expect(registered[0]?.inputSchema).toEqual(spendToolSchema)
+})
+
+test('the spend tool is not registered when the ledger is off', { options: { spendLedger: false } }, async ($, on) => {
+  mockSession(on)
+  const registered: string[] = []
+  on('tool.register', ($, e) => {
+    registered.push(e.name)
+    return { value: { tool: e.name } as never }
+  })
+  await $.session.start(start)
+  expect(registered).toEqual([])
+})
+
+test('the spend tool answers with the same text as the slash commands and counts once', async ($, on) => {
+  mockSession(on)
+  on('tool.check', () => ({ decision: 'allow' }))
+  const values = new Map<string, unknown>()
+  storeMock(on, values)
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', stopReason: 'end_turn', usage, toolUses: [] }
+  })
+  await $.session.start(start)
+  await $.turn.start({ text: 'query', turnId: 't1' })
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: 'test-model', messageCount: 1 })) void chunk
+  const tool = async (input: Record<string, unknown>) =>
+    (await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', ...input } as never) as unknown as { result: string }).result
+  expect(await tool({ report: 'why', days: 1 })).toBe((await $.command.run({ ...command, args: 'why' })).text)
+  expect(await tool({ report: 'spend', by: 'agent', days: 3 })).toBe((await $.command.run({ ...command, args: 'spend agent 3' })).text)
+  expect(await tool({ report: 'compare' })).toBe((await $.command.run({ ...command, args: 'compare' })).text)
+  await $.turn.complete(completion)
+  const counted = await tool({ report: 'spend' })
+  expect(counted).toContain('Codeflow spend · last 7 day(s) · by project')
+})
+
+test('bad spend tool input answers a usage line and is tolerant otherwise', async ($, on) => {
+  mockSession(on)
+  on('tool.check', () => ({ decision: 'allow' }))
+  const values = new Map<string, unknown>()
+  storeMock(on, values)
+  await $.session.start(start)
+  const tool = async (input: Record<string, unknown>) =>
+    (await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', ...input } as never) as unknown as { result: string }).result
+  expect(await tool({ report: 'nope' })).toBe('Use report: why, spend or compare.')
+  expect(await tool({})).toBe('Use report: why, spend or compare.')
+  expect(await tool({ report: 'spend', by: 'x' })).toBe((await $.command.run({ ...command, args: 'spend' })).text)
+  expect(await tool({ report: 'why', days: 99 })).toContain('last 30 day(s)')
+  expect(await tool({ report: 'spend', days: 0 })).toContain('last 1 day(s)')
+  expect(await tool({ report: 'why', days: 'soon' })).toContain('last 1 day(s)')
+})
+
+test('the general tool.call hook keeps counting other tools next to the spend tool', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('tool.call', () => ({ result: 'ok' }))
+  await $.session.start(start)
+  await $.turn.start({ text: 'query', turnId: 't1' })
+  await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'spend' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'printf ok' })
+  const ended = await $.turn.complete(completion)
+  expect(ended.text).toContain('2 call(s)')
+})
+
+test('turn USD is the session cost delta over the turn and is omitted when the delta is zero', async ($, on) => {
+  const counter = { usd: 1 }
+  mockSession(on, {}, counter)
+  const values = new Map<string, unknown>()
+  storeMock(on, values)
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', stopReason: 'end_turn', usage, toolUses: [] }
+  })
+  await $.session.start(start)
+  await $.turn.start({ text: 'query', turnId: 't1' })
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: 'test-model', messageCount: 1 })) void chunk
+  counter.usd = 1.25
+  const priced = await $.turn.complete(completion)
+  expect(priced.text).toContain('turn USD 0.25')
+  await $.turn.start({ text: 'again', turnId: 't2' })
+  for await (const chunk of $.turn.step({ turnId: 't2', index: 0, model: 'test-model', messageCount: 1 })) void chunk
+  const flat = await $.turn.complete({ ...completion, turnId: 't2' })
+  expect(flat.text).not.toContain('turn USD')
+})
+
+test('a turn with no cost reading gets no turn USD figure', () => {
+  const turn = newTurnTelemetry('t1', 0)
+  turn.modelRequests = 1
+  turn.usage = { input: 100, cacheRead: 0, cacheCreation: 0, output: 1 }
+  expect(buildTurnSummaryLine(turn, null)).not.toContain('turn USD')
+  turn.turnUsd = 0.5
+  expect(buildTurnSummaryLine(turn, null)).toContain('turn USD 0.5')
+})
+
+test('cache rebuilds are detected above the threshold, when they write more than they read, and not on the fresh-session first request', async () => {
+  const rebuildStep = { model: 'claude-fable-5' }
+  const threshold = captureFake(new Map<string, unknown>(), captureState({ usd: 2 }))
+  const spend = newSpendSession()
+  await startSpendSession(spend, threshold)
+  expect(await recordStep(spend, threshold, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 49_999, cache_read_input_tokens: 0 })).toBe(null)
+  const event = await recordStep(spend, threshold, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 50_000, cache_read_input_tokens: 0 })
+  expect(event?.tokens).toBe(50_000)
+  near(event?.est ?? -1, 1)
+  expect(await recordStep(spend, threshold, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 60_000, cache_read_input_tokens: 70_000 })).toBe(null)
+  expect(await recordStep(spend, threshold, '/work', { model: 'Explore-model', agentId: 'a9' }, { input_tokens: 10, cache_creation_input_tokens: 60_000 })).toBe(null)
+  expect(spend.entry?.rebuild?.count).toBe(1)
+  const fresh = newSpendSession()
+  const freshFake = captureFake(new Map<string, unknown>(), captureState({ usd: 0 }))
+  await startSpendSession(fresh, freshFake)
+  expect(await recordStep(fresh, freshFake, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 60_000 })).toBe(null)
+  expect(await recordStep(fresh, freshFake, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 60_000 })).not.toBe(null)
+  expect(fresh.entry?.rebuild?.count).toBe(1)
+  const resumed = newSpendSession()
+  const resumedFake = captureFake(new Map<string, unknown>(), captureState({ usd: 2 }))
+  await startSpendSession(resumed, resumedFake)
+  expect(await recordStep(resumed, resumedFake, '/work', rebuildStep, { input_tokens: 10, cache_creation_input_tokens: 60_000 })).not.toBe(null)
+  expect(resumed.entry?.rebuild?.count).toBe(1)
+})
+
+test('rebuild counters are summed by merge and by compaction', () => {
+  const now = Date.UTC(2026, 10, 23, 12)
+  const older = dayBefore(now, 3)
+  const a = sessionEntry(older, 's1', '/a', 10)
+  a.rebuild = { count: 1, tokens: 50_000, est: 1 }
+  const b = sessionEntry(older, 's2', '/a', 10)
+  b.rebuild = { count: 2, tokens: 70_000, est: 1.5 }
+  expect(mergeEntries(a, b).rebuild).toEqual({ count: 3, tokens: 120_000, est: 2.5 })
+  expect(mergeEntries(a, sessionEntry(older, 's3', '/a', 1)).rebuild).toEqual({ count: 1, tokens: 50_000, est: 1 })
+  const values = new Map<string, unknown>([[ledgerKey(older, 's1'), a], [ledgerKey(older, 's2'), b]])
+  return compactLedger(captureFake(values, captureState()), now, () => true).then(() => {
+    expect((values.get(compactedKey(older, '/a')) as LedgerEntry).rebuild).toEqual({ count: 3, tokens: 120_000, est: 2.5 })
+  })
+})
+
+test('the summary line names the cache rebuild of the turn', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('turn.step', async function* ($, e) {
+    return {
+      turnId: e.turnId, index: e.index, answer: '', stopReason: 'end_turn',
+      usage: { model: 'test-model', input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 60_000 },
+      toolUses: [],
+    }
+  })
+  await $.session.start(start)
+  await $.turn.start({ text: 'query', turnId: 't1' })
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: 'test-model', messageCount: 1 })) void chunk
+  const ended = await $.turn.complete(completion)
+  expect(ended.text).toContain('cache rebuilt 60,000 tok ≈ USD 0.36 write cost')
+})
+
+test('the why report prints the cache rebuild line with its share only when there were rebuilds', () => {
+  const entry = newLedgerEntry(dayB, 's1', '/w', 1)
+  entry.costUsd = 2
+  addRequest(entry, 'main', 'claude-fable-5-2', { input_tokens: 1_000_000 })
+  entry.rebuild = { count: 2, tokens: 100_000, est: 0.5 }
+  const lines = buildWhyReport([entry], [], [entry], 1, WHY_NOW).split('\n')
+  expect(lines).toContain('Cache rebuilds: 2 · 100,000 tok · ≈ USD 0.125 write cost (6% of spend)')
+  const plain = { ...entry, rebuild: undefined }
+  expect(buildWhyReport([plain], [], [plain], 1, WHY_NOW)).not.toContain('Cache rebuilds')
+})
+
+function bareSession(on: On, clockDown: { value: boolean }) {
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 1, window: 2, percent: 1 }, rateLimits: [], cost: { usd: 0 } },
+  }))
+  on('clock.now', () => {
+    if (clockDown.value) throw new Error('clock is down')
+    return { value: 1000 }
+  })
+  on('tool.check', () => ({ decision: 'allow' }))
+}
+
+test('a deny verdict refuses the spend tool with the engine reason and no report text', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('tool.check', () => ({ decision: 'deny', reason: 'Denied by settings' }))
+  await $.session.start(start)
+  const result = await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'why' } as never) as unknown as { deny?: string; result?: string }
+  expect(result.deny).toBe('Denied by settings')
+  expect(result.result).toBe(undefined)
+})
+
+test('a deny verdict without a reason refuses the spend tool with the default denial text', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('tool.check', () => ({ decision: 'deny' }))
+  await $.session.start(start)
+  const result = await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'spend' } as never) as unknown as { deny?: string }
+  expect(result.deny).toBe('Codeflow spend report is denied by a permission rule.')
+})
+
+test('an ask verdict refuses the spend tool with the permission text, since no hand-off to the dialog is documented for it', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('tool.check', () => ({ decision: 'ask', reason: 'needs approval' }))
+  await $.session.start(start)
+  const result = await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'why' } as never) as unknown as { deny?: string; result?: string }
+  expect(result.deny).toBe('Codeflow spend report needs permission. Allow mcp__codeflow__spend_report in your Claude Code permissions to use it.')
+  expect(result.result).toBe(undefined)
+})
+
+test('a throwing permission check refuses the spend tool with the permission text', async ($, on) => {
+  mockSession(on)
+  storeMock(on, new Map<string, unknown>())
+  on('tool.check', () => { throw new Error('check failed') })
+  await $.session.start(start)
+  const result = await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'why' } as never) as unknown as { deny?: string; result?: string }
+  expect(result.deny).toBe('Codeflow spend report needs permission. Allow mcp__codeflow__spend_report in your Claude Code permissions to use it.')
+  expect(result.result).toBe(undefined)
+})
+
+test('a failing spend tool answers the fallback text and other tools still run', async ($, on) => {
+  const clockDown = { value: false }
+  bareSession(on, clockDown)
+  on('store.keys', () => ({ value: [] }))
+  on('tool.call', ($, e) => (e.tool === 'Bash' ? { result: 'bash ran' } : { result: 'other' }))
+  await $.session.start(start)
+  clockDown.value = true
+  const spend = await $.tool.call({ tool: 'mcp__codeflow__spend_report', tool_use_id: 'x', report: 'why' } as never) as unknown as { result?: string }
+  expect(spend.result).toBe('Codeflow could not read the spend ledger.')
+  clockDown.value = false
+  const bash = await $.tool.call({ tool: 'Bash', command: 'printf ok' }) as unknown as { result?: string }
+  expect(bash.result).toBe('bash ran')
+})
+
+test('why reads the ledger once and filters the requested window in memory', async () => {
+  const now = Date.UTC(2026, 10, 23, 12)
+  const values = new Map<string, unknown>()
+  const reads = new Map<string, number>()
+  for (const [day, id] of [[dayBefore(now, 0), 'today'], [dayBefore(now, 3), 'three'], [dayBefore(now, 20), 'old']] as const) {
+    values.set(ledgerKey(day, id), sessionEntry(day, id, '/a', 10))
+  }
+  const base = captureFake(values, captureState({ now }))
+  const counting = {
+    ...base,
+    store: {
+      ...base.store,
+      get: async (key: string) => {
+        reads.set(key, (reads.get(key) ?? 0) + 1)
+        return values.get(key)
+      },
+    },
+  } as unknown as EngineInterface
+  const text = await spendText(counting, 'spend', 'project', 1)
+  expect(text).toContain('Codeflow spend · last 1 day(s) · by project')
+  expect(text).toContain('/a · 1 session(s)')
+  const longer = await spendText(counting, 'why', 'project', 7)
+  expect(longer).toContain('Codeflow why · last 7 day(s)')
+  for (const key of values.keys()) expect(reads.get(key)).toBe(2)
+})
+
+test('cache rebuilds are not flagged for a large new tool result, a shrunken prompt after a clear, or a fresh first request', async () => {
+  const resumed = captureFake(new Map<string, unknown>(), captureState({ usd: 2 }))
+  const grow = newSpendSession()
+  await startSpendSession(grow, resumed)
+  await recordStep(grow, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 100_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  expect(await recordStep(grow, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 1_000, cache_read_input_tokens: 100_000, cache_creation_input_tokens: 60_000 })).toBe(null)
+  const cleared = newSpendSession()
+  await startSpendSession(cleared, resumed)
+  await recordStep(cleared, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 400_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  expect(await recordStep(cleared, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 60_000 })).toBe(null)
+  const fresh = captureFake(new Map<string, unknown>(), captureState({ usd: 0 }))
+  const first = newSpendSession()
+  await startSpendSession(first, fresh)
+  expect(await recordStep(first, fresh, '/work', { model: 'claude-fable-5' }, { input_tokens: 10, cache_creation_input_tokens: 60_000 })).toBe(null)
+})
+
+test('a collapsed cache read at the same prompt size is flagged, and so is a resumed session first request', async () => {
+  const resumed = captureFake(new Map<string, unknown>(), captureState({ usd: 2 }))
+  const collapsed = newSpendSession()
+  await startSpendSession(collapsed, resumed)
+  await recordStep(collapsed, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 100_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  const event = await recordStep(collapsed, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 100_000 })
+  expect(event?.tokens).toBe(100_000)
+  expect(collapsed.entry?.rebuild?.count).toBe(1)
+  const restart = newSpendSession()
+  await startSpendSession(restart, resumed)
+  const firstOfResumed = await recordStep(restart, resumed, '/work', { model: 'claude-fable-5' }, { input_tokens: 10, cache_creation_input_tokens: 60_000 })
+  expect(firstOfResumed?.tokens).toBe(60_000)
 })

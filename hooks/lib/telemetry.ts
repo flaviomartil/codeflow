@@ -27,6 +27,10 @@ export interface TurnTelemetry {
   efforts: string[]
   outcome: TurnOutcome
   thinking: ThinkingSummary
+  turnUsd: number | null
+  rebuilds: number
+  rebuildTokens: number
+  rebuildUsd: number
 }
 
 export interface ContextSnapshot {
@@ -61,6 +65,10 @@ export function newTurnTelemetry(turnId: string | null, startedAtMs: number | nu
     efforts: [],
     outcome: 'in progress',
     thinking: { blocks: 0, words: 0 },
+    turnUsd: null,
+    rebuilds: 0,
+    rebuildTokens: 0,
+    rebuildUsd: 0,
   }
 }
 

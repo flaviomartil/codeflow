@@ -1,8 +1,9 @@
 import type { EngineInterface } from 'claude-code'
 import { snapshotContext, newSessionTelemetry } from './telemetry'
 import {
-  contextKey, dayOf, isContextSnapshot, isLedgerEntry, ledgerKey, MAIN_AGENT, mergeEntries, newLedgerEntry, recordRequest,
-  saveLedgerEntry, SNAPSHOT_EVERY_MS, UNKNOWN_SUBAGENT, type ContextSnapshot, type LedgerEntry, type PlanWindow,
+  contextKey, dayOf, isContextSnapshot, isLedgerEntry, isRebuild, isRebuildAgainst, ledgerKey, MAIN_AGENT, mergeEntries, newLedgerEntry,
+  rebuildEstimate, recordRequest, saveLedgerEntry, SNAPSHOT_EVERY_MS, UNKNOWN_SUBAGENT, type ContextSnapshot,
+  type LedgerEntry, type PlanWindow,
 } from './ledger'
 
 const TAG_PATTERN = /^[A-Za-z0-9_.-]{1,32}$/
@@ -15,6 +16,7 @@ export interface SpendSession {
   startupPending: boolean
   snapshotAtMs: number | null
   mainInputSince: number
+  prevMainInput: number | null
   model: string | null
   lastCategories: Array<[string, number]> | null
   snapshotUses: number | null
@@ -36,6 +38,7 @@ export function newSpendSession(): SpendSession {
     startupPending: false,
     snapshotAtMs: null,
     mainInputSince: 0,
+    prevMainInput: null,
     model: null,
     lastCategories: null,
     snapshotUses: null,
@@ -144,9 +147,18 @@ async function readTag($: EngineInterface): Promise<string | undefined> {
   return typeof value === 'string' && TAG_PATTERN.test(value) ? value : undefined
 }
 
-async function flushNow(spend: SpendSession, $: EngineInterface, allowSnapshot: boolean): Promise<void> {
+export interface RebuildEvent {
+  tokens: number
+  est: number
+}
+
+export async function readSessionCost($: EngineInterface): Promise<number | null> {
+  return costOf(await usageSnapshot($, false))
+}
+
+async function flushNow(spend: SpendSession, $: EngineInterface, allowSnapshot: boolean): Promise<number | null> {
   const entry = spend.entry
-  if (entry === null || !spend.dirty) return
+  if (entry === null || !spend.dirty) return null
   const now = await $.clock.now()
   const due = allowSnapshot && (spend.snapshotAtMs === null || now - spend.snapshotAtMs >= SNAPSHOT_EVERY_MS)
   const raw = await usageSnapshot($, due)
@@ -174,6 +186,7 @@ async function flushNow(spend: SpendSession, $: EngineInterface, allowSnapshot: 
   entry.updatedAtMs = now
   await saveLedgerEntry($, entry).catch(() => undefined)
   spend.dirty = false
+  return cost
 }
 
 async function rollLedger(spend: SpendSession, $: EngineInterface, cwd: string, day: string): Promise<LedgerEntry> {
@@ -223,18 +236,37 @@ export function startSpendSession(spend: SpendSession, $: EngineInterface): Prom
   })
 }
 
-export function recordStep(spend: SpendSession, $: EngineInterface, cwd: string, step: SpendStep, usage: unknown): Promise<void> {
+export function recordStep(
+  spend: SpendSession,
+  $: EngineInterface,
+  cwd: string,
+  step: SpendStep,
+  usage: unknown,
+): Promise<RebuildEvent | null> {
   return enqueue(spend, async () => {
     if (spend.today === null) spend.today = dayOf(await $.clock.now())
     const day = spend.today
     let entry = spend.entry
     if (entry === null || entry.day !== day) entry = await rollLedger(spend, $, cwd, day)
     const mainLoop = step.agentId === undefined
+    const startupRequest = mainLoop && spend.startupPending
+    const previous = spend.prevMainInput
     const agent = mainLoop ? MAIN_AGENT : await agentLabel(spend, $, step.agentId ?? '')
     const recorded = recordRequest(entry, agent, step.model, usage, mainLoop)
-    if (recorded === null) return
+    if (recorded === null) return null
     spend.dirty = true
+    let rebuild: RebuildEvent | null = null
+    const rebuilt = previous === null
+      ? !startupRequest && isRebuild(recorded.cacheCreation, recorded.cacheRead)
+      : isRebuildAgainst(previous, recorded.cacheCreation, recorded.cacheRead, recorded.totalInput)
+    if (mainLoop && rebuilt) {
+      const est = rebuildEstimate(recorded.model, recorded.input + recorded.cacheRead + recorded.cacheCreation, recorded.cacheCreation)
+      const current = entry.rebuild ?? { count: 0, tokens: 0, est: 0 }
+      entry.rebuild = { count: current.count + 1, tokens: current.tokens + recorded.cacheCreation, est: current.est + est }
+      rebuild = { tokens: recorded.cacheCreation, est }
+    }
     if (mainLoop) {
+      spend.prevMainInput = recorded.totalInput
       spend.mainInputSince += recorded.totalInput
       spend.model = step.model
       if (spend.startupPending) {
@@ -242,10 +274,11 @@ export function recordStep(spend: SpendSession, $: EngineInterface, cwd: string,
         if (entry.startup === undefined) entry.startup = { sessions: 1, input: recorded.totalInput }
       }
     }
+    return rebuild
   })
 }
 
-export function flushSpend(spend: SpendSession, $: EngineInterface): Promise<void> {
+export function flushSpend(spend: SpendSession, $: EngineInterface): Promise<number | null> {
   return enqueue(spend, () => flushNow(spend, $, true))
 }
 
@@ -265,6 +298,7 @@ export function endSpendSession(spend: SpendSession, $: EngineInterface): Promis
     spend.startupPending = false
     spend.snapshotAtMs = null
     spend.mainInputSince = 0
+    spend.prevMainInput = null
     spend.model = null
     spend.lastCategories = null
     spend.snapshotUses = null

@@ -103,6 +103,24 @@ function fixedLine(entries: LedgerEntry[], snapshots: ContextSnapshot[]): string
   return 'Largest fixed items: ' + [...largest, `fixed context ${count(fixed)} tok per request`].join(' · ')
 }
 
+function entryScale(entry: LedgerEntry): number {
+  const weight = Object.entries(entry.rows).reduce((sum, [key, bucket]) => sum + bucketEst(key, bucket), 0)
+  return entry.costUsd !== null && entry.costUsd > 0 && weight > 0 ? entry.costUsd / weight : 1
+}
+
+function rebuildLine(entries: LedgerEntry[], spent: number): string | null {
+  const totals = entries.reduce((sum, entry) => {
+    if (entry.rebuild === undefined) return sum
+    return {
+      count: sum.count + entry.rebuild.count,
+      tokens: sum.tokens + entry.rebuild.tokens,
+      est: sum.est + entry.rebuild.est * entryScale(entry),
+    }
+  }, { count: 0, tokens: 0, est: 0 })
+  if (totals.count === 0) return null
+  return `Cache rebuilds: ${count(totals.count)} · ${count(totals.tokens)} tok · ≈ USD ${usd(totals.est)} write cost (${share(totals.est, spent)}% of spend)`
+}
+
 function delegationLine(entries: LedgerEntry[], spent: number): string {
   const mainTotals = new Map<string, number>()
   let subagentRows = false
@@ -117,8 +135,7 @@ function delegationLine(entries: LedgerEntry[], spent: number): string {
   let same = 0
   for (const entry of entries) {
     const rows = Object.entries(entry.rows)
-    const weight = rows.reduce((sum, [key, bucket]) => sum + bucketEst(key, bucket), 0)
-    const scale = entry.costUsd !== null && entry.costUsd > 0 && weight > 0 ? entry.costUsd / weight : 1
+    const scale = entryScale(entry)
     const entryTotals = new Map<string, number>()
     for (const [key, bucket] of rows) {
       const parts = splitRowKey(key)
@@ -173,6 +190,8 @@ export function buildWhyReport(
   if (mix !== null) lines.push(mix)
   const fixed = fixedLine(entries, snapshots)
   if (fixed !== null) lines.push(fixed)
+  const rebuilds = rebuildLine(entries, spent)
+  if (rebuilds !== null) lines.push(rebuilds)
   lines.push(delegationLine(entries, spent))
   return lines.join('\n')
 }
