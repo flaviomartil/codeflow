@@ -1,13 +1,15 @@
 # Codeflow
 
-Codeflow is a Claude Code plugin that shows where your tokens and money go. It measures every turn, keeps a 30-day record of spend by project, day, model and agent (subagents included), and can optionally trim large read and search results before they reach the context.
+Codeflow is a Claude Code plugin that shows where your tokens and money go. It measures every turn, keeps a 30-day record of spend by project, day, model, agent and tag (subagents included), and can optionally trim large read and search results before they reach the context.
 
 It works in normal sessions and alongside the [native Code Mode](https://code.claude.com/docs/en/code-mode). It never changes a permission decision.
 
 ## What you get
 
 - A one-line summary under each response: duration, requests, tool calls, tokens and context use.
-- `/codeflow spend`: tokens and cost by project, day, model or agent for the last 30 days.
+- `/codeflow spend`: tokens and cost by project, day, model, agent or tag for the last 30 days.
+- `/codeflow why`: today's spend, its share of your plan window, and what the context and subagents weighed.
+- `/codeflow compare`: sessions side by side, to see whether a layer such as a proxy or compression changes the cost per request.
 - `/codeflow report`: totals for the current session, and for a group of sessions when you set a run ID.
 - An opt-in active mode that shortens long `Read`, `Grep` and `Glob` results.
 
@@ -54,7 +56,7 @@ After a few sessions, ask where the spend went:
 ## See where the spend goes
 
 ```text
-/codeflow spend [project|day|model|agent] [days]
+/codeflow spend [project|day|model|agent|tag] [days]
 ```
 
 Both arguments are optional and can come in either order. The default is `project` over the last 7 days. The maximum is 30 days.
@@ -65,34 +67,66 @@ Both arguments are optional and can come in either order. The default is `projec
 | `/codeflow spend day 30` | Each day of the last 30 |
 | `/codeflow spend model` | Each model |
 | `/codeflow spend agent 1` | The main loop and each subagent type, today |
+| `/codeflow spend tag` | Each tag set with `CLAUDE_CODEFLOW_TAG`, last 7 days |
 
 Example, by agent:
 
 ```text
 Codeflow spend · last 1 day(s) · by agent
-main · 12 request(s) · total input 570,079 · new input 24 · cache read 420,775 · cache created 149,280 · output 1,271 · 83.4% of tokens
-Explore · 6 request(s) · total input 111,841 · new input 12 · cache read 71,953 · cache created 39,876 · output 1,763 · 16.6% of tokens
-Total · 4 session(s) · 18 request(s) · total input 681,920 · new input 36 · cache read 492,728 · cache created 189,156 · output 3,034 · 100% of tokens · USD 0.0413
+main · 20 request(s) · total input 997,529 · new input 40 · cache read 723,531 · cache created 273,958 · output 1,755 · 76.3% of tokens · ≈ USD 0.0584
+Explore · 14 request(s) · total input 306,403 · new input 28 · cache read 214,884 · cache created 91,491 · output 3,238 · 23.7% of tokens · ≈ USD 0.0197
+Total · 7 session(s) · 34 request(s) · total input 1,303,932 · new input 68 · cache read 938,415 · cache created 365,449 · output 4,993 · 100% of tokens · USD 0.0781
 ```
 
 How to read it:
 
 - **Agent** is `main` for the main loop and the subagent type for everything else, such as `Explore` or a plugin's agent name. A subagent whose type cannot be found is listed as `subagent`.
-- **Model** is the model that answered the request.
+- **Model** is the model that answered the request. When the response names a different model, that one is used.
 - **Project** is the session's project root.
-- **Day** is the local day on which the turn started.
-- **USD** appears in the project and day views and in the total. Claude Code reports cost per session, so the model and agent views show tokens and their share of the total instead of a price. The session cost also covers requests that are not part of a turn, such as compaction and titles.
+- **Day** is the local day on which the turn started. A request is dated by the local day its turn started.
+- **Tag** is the value of `CLAUDE_CODEFLOW_TAG` when the session started. Sessions without a tag are listed as `untagged`.
+- **USD** is the real session cost from Claude Code: its list-price cost for the session, an API-price equivalent. On a subscription it is not a bill. It appears in the project, day, tag and total lines. The session cost also covers requests that are not part of a turn, such as compaction and titles, so it is not a per-row price.
+- **≈ USD** is an estimate for the model and agent rows, and for any row when Claude Code reports no cost. It splits the session cost by the list-price weight of each row's tokens. List prices are a table inside the plugin and can lag behind Anthropic's current prices.
 - **Sessions** are counted once each, even when a session spans two days.
+- **Startup context** (in `/codeflow compare`) is the size of the first request of a new session.
 
 ### What the ledger stores
 
 The ledger lives in the plugin's local store. Nothing is sent anywhere.
 
-For each session and local day it keeps the absolute project path, the session id, the model ids, the subagent types, the token totals and the session cost in USD. It stores no prompt text, no file content and no tool output.
+For each session and local day it keeps the absolute project path, the session id, the model ids, the subagent types, the token totals, the session cost in USD, the estimated list-price cost, the optional tag from `CLAUDE_CODEFLOW_TAG`, the size of the first request of a new session (startup context), the plan window percentages and the context mix. It stores no prompt text, no file content and no tool output.
 
-Once a day is older than yesterday, its sessions are folded into one entry per project, which keeps the totals and the ids of the folded sessions. Entries older than 30 days are deleted.
+Once a day is older than yesterday, its sessions are folded into one entry per project and tag, which keeps the totals, the estimates, the startup sizes, the plan window percentages, the context mix and the ids of the folded sessions. Entries older than 30 days are deleted.
+
+For `/codeflow why` it also keeps, per project, one snapshot of the fixed context: the largest memory file paths, the loaded MCP server names with their token counts, and the skills and agents totals. Each new snapshot replaces the previous one for that project, and snapshots older than 30 days are deleted.
 
 To turn the ledger off, set the `spendLedger` option to off in the plugin configuration. Entries already stored stay until the ledger is on again, and then they age out.
+
+## Why did I spend this
+
+```text
+/codeflow why [days]
+```
+
+The default is today. The day count goes up to 30. The command answers in one block, and a line is left out when it has nothing to say:
+
+```text
+Codeflow why · last 1 day(s)
+Spent USD 0.0933 · plan share not measured yet · 7-day window at 3%
+By agent: main 76% (≈ USD 0.0713) · Explore 24% (≈ USD 0.0221)
+Main-loop context: Messages 43% · Skills 17% · Memory files 12% · System prompt 9% · MCP server instructions 9% · Custom agents 5% · MCP tools 4% · System tools 1% (share of main-loop input tokens)
+Delegation: subagents ≈ USD 0.0221 (24% of spend); the same tokens on claude-haiku-5-5 ≈ USD 0.0221
+```
+
+- **Spent** is the session cost summed over the window. It shows `≈` when Claude Code reports no cost for the entries.
+- **Plan share** converts the spend into a share of your 7-day plan window. The rate comes from this machine's own sessions: Codeflow records the window's usage percentage on each session and divides the change by the cost. It appears once the plan window has moved at least one point while sessions were being recorded, and it says so until then. Usage from other devices moves the plan percentage but not the recorded USD, so the share is approximate. A window whose reset time has passed is not used.
+- **7-day window** and **5-hour window** show the latest percentage Claude Code reported for a window that has not reset yet. The 5-hour line appears only when Claude Code reports that window.
+- **By agent** splits the estimated cost across the main loop and each subagent type. Each row's share is its list-price weight of the session's tokens.
+- **Main-loop context** shows which parts of the context the main loop's input tokens went to, as `/context` estimates them. It is the share of input tokens, not a price per item.
+- **Largest fixed items** come from the snapshot of the highest-spend project in the window that has one. It lists the largest memory files, loaded MCP servers, the skills listing, custom agents and the system prompt and tools, then the fixed context each request carries before any message.
+- **Delegation** reprices the subagents' tokens at the main model's list prices, with their cache writes at the main model's 1-hour rate. It is an indication, not a bound: another model would not use the same number of tokens, and the main loop's context would grow with that work.
+
+The context mix and the fixed items are estimates from a snapshot taken at most every five minutes, and at the end of each session. Nothing here is sent anywhere; the snapshot includes memory file paths and MCP server names, so it stays on this machine with the rest of the ledger.
 
 ## Session report
 
@@ -138,7 +172,9 @@ The variable is read at startup. A missing value, `0` or an invalid value keeps 
 | Command | Result |
 | --- | --- |
 | `/codeflow` | Version and current mode |
-| `/codeflow spend [project\|day\|model\|agent] [days]` | Tokens and cost from the spend ledger |
+| `/codeflow spend [project\|day\|model\|agent\|tag] [days]` | Tokens and cost from the spend ledger |
+| `/codeflow compare [project\|day\|model\|agent\|tag] [days]` | Sessions side by side: prompt size, cache hit, output and startup context per request, and cost per request. Defaults: `tag`, 7 days |
+| `/codeflow why [days]` | Today's spend, its share of the plan window, and what the context and the delegation weighed. Defaults to 1 day |
 | `/codeflow report` | Session totals, plus grouped sessions when a run ID is set |
 | `/codeflow thinking` | Reasoning block and word counts for the last turn. Needs the `thinking` option |
 | `/codeflow stash <name> <text>` | Keeps a piece of text in session memory for 30 minutes. Active mode only |
@@ -166,11 +202,39 @@ Set these in the plugin configuration.
 | Data | Where | When |
 | --- | --- | --- |
 | Turn telemetry | Memory | Always, until the session ends |
-| Spend ledger | Local plugin store, 30 days | Unless `spendLedger` is off |
+| Spend ledger | Local plugin store, 30 days. Includes tag, estimated cost, startup size, plan window percentages and context mix | Unless `spendLedger` is off |
+| Fixed-context snapshot | Local plugin store, one per project, 30 days. Memory file paths, MCP server names, token counts | With `spendLedger` on, at most every five minutes |
 | Session registry for reports | Local plugin store, 24 hours, 50 sessions | Only with `CLAUDE_CODEFLOW_RUN` set |
 | Session summary file | `.codeflow/` in the project | Only with `sessionLog` on |
 
 All of it is numeric telemetry plus the identifiers listed under "What the ledger stores". Fields that Claude Code does not provide are shown as unavailable.
+
+## Compare with and without a layer
+
+To compare a layer such as a proxy, a compression tool or a memory system, tag the sessions that run with it:
+
+```bash
+CLAUDE_CODEFLOW_TAG=proxy-on claude
+```
+
+Put the variable in the shell profile or in the wrapper that turns the layer on, so every session it starts is tagged. The tag takes 1 to 32 letters, digits, dots, dashes and underscores; an invalid value is ignored. A session keeps the tag it started with.
+
+Then run:
+
+```text
+/codeflow compare
+/codeflow compare model 3
+```
+
+Each column in the output means:
+
+- **input/request** is the prompt size per request. A larger prompt means each request carried more context.
+- **cache hit** is the share of the prompt read from the cache. A higher value means more of the prompt was reused.
+- **output/request** is the average answer size per request.
+- **startup context** is the prompt of the first request of a new session, before any work. It shows what rules, memory, tools and skills cost at start. It appears only for sessions that started fresh.
+- **USD/request** is the session cost divided by requests. `≈` marks an estimate from list prices.
+
+Averages over different work are noisy: a session that reads a large repository and one that answers a short question are not comparable. The fair test is the same task run on both sides, with the same model and effort, compared per request.
 
 ## Compare with and without Codeflow
 

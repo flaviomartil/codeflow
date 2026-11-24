@@ -10,7 +10,11 @@ import {
 } from './lib/telemetry'
 import { buildTelemetryReport, buildThinkingDigest, buildTurnSummaryLine } from './lib/report'
 import { entryFromSession, readRegistry, saveEntry } from './lib/registry'
-import { buildSpendReport, compactLedger, parseSpendArgs, pruneLedger, readLedger } from './lib/ledger'
+import {
+  buildCompareReport, buildSpendReport, compactLedger, LEDGER_RETENTION_DAYS, parseSpendArgs, pruneLedger,
+  readLedger, readSnapshots,
+} from './lib/ledger'
+import { buildWhyReport } from './lib/why'
 import {
   endSpendSession, flushSpend, markTurnDay, newSpendSession, recordStep, startSpendSession,
 } from './lib/spend-session'
@@ -32,6 +36,10 @@ function positiveLimit(value: number | undefined, fallback: number, minimum = 1)
 async function currentContext($: EngineInterface, session: ReturnType<typeof newSessionTelemetry>) {
   return snapshotContext(await $.session.usage().catch(() => null), session)
 }
+
+const SPEND_USAGE = 'Use /codeflow spend [project|day|model|agent|tag] [days].'
+const COMPARE_USAGE = 'Use /codeflow compare [project|day|model|agent|tag] [days].'
+const WHY_USAGE = 'Use /codeflow why [days].'
 
 export function register(on: On, options: CodeflowOptions = {}) {
   const limits = {
@@ -195,13 +203,33 @@ export function register(on: On, options: CodeflowOptions = {}) {
       const registry = runId ? await readRegistry($, runId, await $.clock.now()) : []
       return { text: buildTelemetryReport(toggle, runId, registry, telemetry, await currentContext($, telemetry)) }
     }
-    if (sub === 'spend') {
+    if (sub === 'spend' || sub === 'compare') {
       if (!spendLedger) return { text: 'The spend ledger is off. Enable spendLedger in the plugin options.' }
-      const spendArgs = parseSpendArgs(words.slice(1).filter(word => word !== ''))
-      if (spendArgs === null) return { text: 'Use /codeflow spend [project|day|model|agent] [days].' }
+      const compare = sub === 'compare'
+      const spendArgs = parseSpendArgs(words.slice(1).filter(word => word !== ''), compare ? 'tag' : 'project')
+      if (spendArgs === null) {
+        return { text: compare ? COMPARE_USAGE : SPEND_USAGE }
+      }
       await flushSpend(spend, $).catch(() => undefined)
       const entries = await readLedger($, await $.clock.now(), spendArgs.days)
-      return { text: buildSpendReport(entries, spendArgs.by, spendArgs.days) }
+      return {
+        text: compare
+          ? buildCompareReport(entries, spendArgs.by, spendArgs.days)
+          : buildSpendReport(entries, spendArgs.by, spendArgs.days),
+      }
+    }
+    if (sub === 'why') {
+      if (!spendLedger) return { text: 'The spend ledger is off. Enable spendLedger in the plugin options.' }
+      const args = words.slice(1).filter(word => word !== '')
+      if (args.length > 1 || (args.length === 1 && !/^\d+$/.test(args[0] ?? ''))) return { text: WHY_USAGE }
+      const days = args.length === 0 ? 1 : Math.min(LEDGER_RETENTION_DAYS, Number(args[0]))
+      if (days < 1) return { text: WHY_USAGE }
+      await flushSpend(spend, $).catch(() => undefined)
+      const now = await $.clock.now()
+      const entries = await readLedger($, now, days)
+      const calibration = await readLedger($, now, LEDGER_RETENTION_DAYS)
+      const snapshots = await readSnapshots($)
+      return { text: buildWhyReport(entries, snapshots, calibration, days, now) }
     }
     if (sub === 'thinking') {
       const last = telemetry.turns.at(-1) ?? telemetry.current
@@ -231,11 +259,13 @@ export function register(on: On, options: CodeflowOptions = {}) {
     }
     return {
       text: [
-        'Codeflow 1.2.0',
+        'Codeflow 1.3.0',
         toggle.enabled ? 'Active mode' : 'Passive mode',
         toggle.invalid ? 'Invalid CLAUDE_CODEFLOW_ENABLED. Use 0 or 1.' : '',
         'Use /codeflow report to see session usage.',
         'Use /codeflow spend to see where tokens and cost went.',
+        'Use /codeflow compare to compare sessions by tag.',
+        'Use /codeflow why to see what the spend went on today.',
         'Use Ctrl+O to inspect the native executor Code blocks.',
       ].filter(Boolean).join('\n'),
     }
